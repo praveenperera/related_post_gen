@@ -88,5 +88,5 @@ elif [ "$first_arg" = "all" ]; then
         run_python
 
 else
-    echo "Valid args: go | rust | python | all. Unknown argument: $first_arg"
+    echo "Valid args: go | rust | rust_ray | python | all. Unknown argument: $first_arg"
 fi

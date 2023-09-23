@@ -1,8 +1,4 @@
-use std::{
-    cmp::Reverse,
-    collections::BinaryHeap,
-    sync::{Arc, Mutex},
-};
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 use rayon::prelude::*;
 use rustc_data_structures::fx::FxHashMap;
@@ -40,46 +36,67 @@ fn main() {
         }
     }
 
-    let related_posts: Arc<Mutex<Vec<RelatedPosts>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(posts.len())));
+    let (sender, receiver) = crossbeam::channel::bounded(1000);
+    let (done_sender, done_receiver) = crossbeam::channel::bounded(1);
 
-    posts.par_iter().enumerate().for_each(|(idx, post)| {
-        let mut tagged_post_count = vec![0; posts.len()];
-        tagged_post_count.fill(0);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut related_posts: Vec<RelatedPosts> = Vec::with_capacity(posts.len());
 
-        for tag in &post.tags {
-            if let Some(tag_posts) = post_tags_map.get(tag) {
-                for other_post_idx in tag_posts {
-                    if idx != *other_post_idx {
-                        tagged_post_count[*other_post_idx] += 1;
+            while let Ok(related_post) = receiver.recv() {
+                match related_post {
+                    Some(related_post) => related_posts.push(related_post),
+                    None => {
+                        done_sender.send(related_posts).unwrap();
+                        break;
                     }
                 }
             }
-        }
+        });
 
-        let mut top_five = BinaryHeap::new();
-        tagged_post_count
-            .iter()
-            .enumerate()
-            .for_each(|(post, count)| {
-                if top_five.len() < 5 {
-                    top_five.push((Reverse(count), post));
-                } else {
-                    let (Reverse(cnt), _) = top_five.peek().unwrap();
-                    if count > *cnt {
-                        top_five.pop();
-                        top_five.push((Reverse(count), post));
+        posts.par_iter().enumerate().for_each(|(idx, post)| {
+            let mut tagged_post_count = vec![0; posts.len()];
+            tagged_post_count.fill(0);
+
+            for tag in &post.tags {
+                if let Some(tag_posts) = post_tags_map.get(tag) {
+                    for other_post_idx in tag_posts {
+                        if idx != *other_post_idx {
+                            tagged_post_count[*other_post_idx] += 1;
+                        }
                     }
                 }
-            });
+            }
 
-        related_posts.lock().unwrap().push(RelatedPosts {
-            _id: &post._id,
-            tags: &post.tags,
-            related: top_five.into_iter().map(|(_, post)| &posts[post]).collect(),
+            let mut top_five = BinaryHeap::new();
+            tagged_post_count
+                .iter()
+                .enumerate()
+                .for_each(|(post, count)| {
+                    if top_five.len() < 5 {
+                        top_five.push((Reverse(count), post));
+                    } else {
+                        let (Reverse(cnt), _) = top_five.peek().unwrap();
+                        if count > *cnt {
+                            top_five.pop();
+                            top_five.push((Reverse(count), post));
+                        }
+                    }
+                });
+
+            sender
+                .send(Some(RelatedPosts {
+                    _id: &post._id,
+                    tags: &post.tags,
+                    related: top_five.into_iter().map(|(_, post)| &posts[post]).collect(),
+                }))
+                .unwrap();
         });
-    });
 
-    let json_str = serde_json::to_string(related_posts.lock().unwrap().as_slice()).unwrap();
-    std::fs::write("../related_posts_rust_rayon.json", json_str).unwrap();
+        sender.send(None).unwrap();
+
+        let related_posts = done_receiver.recv().unwrap();
+        let json_str = serde_json::to_string(&related_posts).unwrap();
+        std::fs::write("../related_posts_rust_rayon.json", json_str).unwrap();
+    });
 }
